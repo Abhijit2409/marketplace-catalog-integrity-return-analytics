@@ -1,0 +1,7 @@
+# Runtime dependencies for the Marketplace Catalog Integrity pipeline.
+# Silver cleaning uses pandas; the Gold build/validate/export uses DuckDB
+# (Parquet is written via DuckDB's native COPY, so no separate Parquet
+# engine is required); config contracts are parsed with PyYAML.
+pandas
+duckdb
+pyyaml

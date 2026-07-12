@@ -1,0 +1,141 @@
+# =====================================================================
+# Bronze Layer Schema & Integrity Contract
+# =====================================================================
+# Declarative contract consumed by src/validation/bronze_audit.py.
+#
+# Design intent (see CLAUDE.md):
+#   * Bronze is intentionally imperfect (Synthetic Data Rules). The audit
+#     therefore DOCUMENTS dirt for the Silver layer to clean; it does not
+#     try to make Bronze clean.
+#   * Severity model:
+#       - Structural violations FAIL CLOSED  -> primary-key uniqueness,
+#         null primary keys, referential-integrity orphans, leakage of
+#         downstream columns, and Golden-Rule business rules.
+#       - Intentional dirt is reported as WARN -> nulls in non-key
+#         columns, fully-duplicated rows, out-of-range values.
+#     Rationale: a green Bronze audit would mean the synthetic generator
+#     failed to inject realistic imperfection.
+# =====================================================================
+
+bronze_dir: data/01_bronze
+
+# Foreign keys targeting this dimension are coverage-aware: an orphan whose
+# key is a valid value beyond the dimension's maximum is a coverage gap
+# (extend the calendar) -> WARN, not a broken reference.
+calendar_dimension: dim_date
+
+# Golden Rule 1 - No Data Leakage.
+# Normalized substrings (lowercase, alphanumeric-only). If any Bronze
+# column name normalizes to contain one of these, the audit FAILS.
+forbidden_columns:
+  - listingqualityscore
+  - lqs
+  - trustscore
+  - returncost
+  - recoverableprofit
+
+# Allowed values for fact_orders.order_status (Golden Rule 2 vocabulary).
+order_status_values:
+  - delivered
+  - cancelled_pre_shipment
+  - rto_customer_refused
+  - rto_unreachable
+
+tables:
+
+  dim_date:
+    file: dim_date.csv
+    primary_key: date_key
+
+  dim_geography:
+    file: dim_geography.csv
+    primary_key: geo_id
+
+  dim_return_reason:
+    file: dim_return_reason.csv
+    primary_key: reason_code
+
+  dim_seller:
+    file: dim_seller.csv
+    primary_key: seller_id
+
+  ref_category_economics:
+    file: ref_category_economics.csv
+    primary_key: category
+    ranges:
+      - {column: gross_margin_pct, min: 0, max: 1}
+      - {column: recovery_pct_resellable, min: 0, max: 1}
+      - {column: recovery_pct_refurbishable, min: 0, max: 1}
+      - {column: warehouse_handling_cost_aed, min: 0}
+
+  ref_logistics_rate_card:
+    file: ref_logistics_rate_card.csv
+    primary_key: [logistics_zone, weight_band, leg]
+    ranges:
+      - {column: cost_aed, min: 0}
+
+  dim_listing:
+    file: dim_listing.csv
+    primary_key: listing_id
+    foreign_keys:
+      - {column: seller_id, ref_table: dim_seller, ref_column: seller_id}
+    membership:
+      - {column: category, ref_table: ref_category_economics, ref_column: category}
+    ranges:
+      - {column: price, min: 0}
+      - {column: discount_pct, min: 0, max: 1}
+      - {column: image_count, min: 0}
+      - {column: specifications_filled_pct, min: 0, max: 1}
+      - {column: item_weight_kg, min: 0}
+      - {column: variant_count, min: 0}
+
+  fact_listing_traffic:
+    file: fact_listing_traffic.csv
+    primary_key: [listing_id, date_key]
+    foreign_keys:
+      - {column: listing_id, ref_table: dim_listing, ref_column: listing_id}
+      - {column: date_key, ref_table: dim_date, ref_column: date_key}
+    ranges:
+      - {column: impressions, min: 0}
+      - {column: detail_page_views, min: 0}
+      - {column: add_to_carts, min: 0}
+    funnel: [impressions, detail_page_views, add_to_carts]
+
+  fact_orders:
+    file: fact_orders.csv
+    primary_key: order_line_id
+    foreign_keys:
+      - {column: listing_id, ref_table: dim_listing, ref_column: listing_id}
+      - {column: seller_id, ref_table: dim_seller, ref_column: seller_id}
+      - {column: geo_id, ref_table: dim_geography, ref_column: geo_id}
+      - {column: order_date_key, ref_table: dim_date, ref_column: date_key}
+      - {column: promised_delivery_date_key, ref_table: dim_date, ref_column: date_key}
+      # Nullable by design: null iff order never delivered (RTO/cancelled).
+      - {column: actual_delivery_date_key, ref_table: dim_date, ref_column: date_key}
+    membership:
+      - {column: order_status, values_ref: order_status_values}
+    ranges:
+      - {column: quantity, min: 1}
+      - {column: unit_selling_price, min: 0}
+      - {column: item_discount_amount, min: 0}
+      - {column: shipping_fee_charged, min: 0}
+      - {column: delivery_attempts, min: 0}
+
+  fact_returns:
+    file: fact_returns.csv
+    primary_key: return_id
+    foreign_keys:
+      - {column: order_line_id, ref_table: fact_orders, ref_column: order_line_id}
+      - {column: reported_reason_code, ref_table: dim_return_reason, ref_column: reason_code}
+      - {column: return_initiated_date_key, ref_table: dim_date, ref_column: date_key}
+      - {column: return_received_date_key, ref_table: dim_date, ref_column: date_key}
+    ranges:
+      - {column: quantity_returned, min: 1}
+      - {column: refund_amount, min: 0}
+    # Golden Rule 2: every returned line must trace to a DELIVERED order.
+    delivered_only:
+      order_ref_column: order_line_id
+      orders_table: fact_orders
+      orders_key: order_line_id
+      orders_status_column: order_status
+      delivered_value: delivered

@@ -1,0 +1,20 @@
+geo_id,emirate,city,zone_type,logistics_zone
+G001,Dubai,Dubai Marina,urban_core,urban_core
+G002,Dubai,Deira,urban_core,urban_core
+G003,Dubai,Jebel Ali,suburban,suburban
+G004,Dubai,Mirdif,suburban,suburban
+G005,Abu Dhabi,Abu Dhabi City,urban_core,urban_core
+G006,Abu Dhabi,Al Ain,remote,remote
+G007,Abu Dhabi,Mussafah,suburban,suburban
+G008,Abu Dhabi,Western Region,remote,remote
+G009,Sharjah,Sharjah City,urban_core,urban_core
+G010,Sharjah,Al Nahda,suburban,suburban
+G011,Sharjah,Khor Fakkan,remote,remote
+G012,Ajman,Ajman City,suburban,suburban
+G013,Ajman,Al Jurf,suburban,suburban
+G014,Ras Al Khaimah,RAK City,suburban,suburban
+G015,Ras Al Khaimah,Al Rams,remote,remote
+G016,Fujairah,Fujairah City,suburban,suburban
+G017,Fujairah,Dibba,remote,remote
+G018,Umm Al Quwain,UAQ City,remote,remote
+G019,Umm Al Quwain,Falaj Al Mualla,remote,remote

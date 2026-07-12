@@ -1,0 +1,513 @@
+# =====================================================================
+# Gold Layer Semantic Contract - Business Metric Definitions
+# =====================================================================
+# This file is the SINGLE SOURCE OF TRUTH for what every Gold metric MEANS.
+# It is a contract, not an implementation: formulas are CONCEPTUAL. No SQL,
+# no engine-specific syntax. SQL/Python implementations (Phase 6+) must
+# conform to these definitions; the data dictionary (docs/data_dictionary.md)
+# documents every input column referenced here.
+#
+# Golden Rules (CLAUDE.md) encoded below:
+#   * Rule 1 - No leakage: LQS, Trust Score, Return Cost and Recoverable
+#     Profit are DERIVED-ONLY. They must be absent from Bronze and Silver and
+#     computed only in Gold. Each is tagged `derived_only: true`.
+#   * Rule 2 - RTO is not a return: return-based metrics use DELIVERED-only
+#     denominators; RTO is measured solely from fact_orders.order_status and
+#     never mixed into return metrics.
+#   * Hidden variables (Seller Operational Quality, True Product Quality,
+#     Expectation Gap, courier performance) are NEVER metric inputs. Trust
+#     Score is an OBSERVABLE proxy, not a window onto these latent variables.
+# =====================================================================
+
+source_layer: data/02_silver
+as_of_date_key: 20260707          # logical "today" (matches Silver build)
+currency: AED
+
+# ---------------------------------------------------------------------
+# Shared conventions - referenced by the metrics below so each formula is
+# defined once and consistently.
+# ---------------------------------------------------------------------
+conventions:
+
+  revenue:
+    # Stated ONCE; flows into Gross Margin, Return Cost and Recoverable Profit.
+    realized_net_revenue_per_line: >
+      quantity * unit_selling_price - item_discount_amount.
+      unit_selling_price is the per-unit price charged to the customer;
+      item_discount_amount is the line-level discount already expressed in
+      AED and is subtracted, not re-derived from discount_pct.
+      shipping_fee_charged is customer-paid delivery and is treated as a
+      logistics offset, NOT merchandise margin.
+    recognition: Revenue is realized only on delivered order lines.
+
+  denominators:
+    delivered_units: SUM(fact_orders.quantity) WHERE order_status = 'delivered'
+    shipped_orders: >
+      COUNT(fact_orders) WHERE order_status IN
+      ('delivered','rto_customer_refused','rto_unreachable').
+      Excludes cancelled_pre_shipment (never dispatched; these are exactly the
+      2,124 rows with delivery_attempts = 0).
+    returned_units: >
+      SUM(fact_returns.quantity_returned). Delivered-only by construction
+      (Golden Rule 2: fact_returns contains only delivered order lines).
+
+  condition_recovery_map:
+    # item_condition_on_receipt -> which recovery ratio applies.
+    resellable: ref_category_economics.recovery_pct_resellable
+    refurbishable: ref_category_economics.recovery_pct_refurbishable
+    write_off: 0.0        # total loss, no salvage value
+
+  weight_band_map:
+    # item_weight_kg -> ref_logistics_rate_card.weight_band
+    "<=0.5kg": "weight <= 0.5"
+    "0.5-2kg": "0.5 < weight <= 2"
+    "2-5kg": "2 < weight <= 5"
+    "5-15kg": "5 < weight <= 15"
+    missing_weight_fallback: >
+      Rows flagged dq_missing_item_weight_kg have no weight. Fallback =
+      category-median weight band (documented assumption; see gaps).
+
+  dq_flag_usage: >
+    Silver dq_* flags are guards, not inputs. Imputed inputs (dq_imputed_*)
+    may be down-weighted or treated as "absent" in composite scores; rows
+    flagged dq_out_of_range_quantity are excluded from revenue/margin;
+    dq_missing_* marks values that must use a documented fallback.
+
+  hidden_variables_excluded:
+    - seller_operational_quality (SOQ)
+    - true_product_quality (TPQ)
+    - expectation_gap
+    - courier_performance
+
+# ---------------------------------------------------------------------
+# Tunable parameters - calibration targets, NOT magic constants. Kept in
+# config so analysts can recalibrate without touching metric logic.
+# ---------------------------------------------------------------------
+parameters:
+
+  recoverable_profit:
+    # Counterfactual: fraction of catalog-related returns eliminable by fixing
+    # the listing. Not observable in the data. Default 1.0 => UPPER BOUND
+    # (full catalog leakage). Lower it once elasticity is estimated.
+    addressable_fraction: 1.0
+
+  listing_quality_score:
+    # Category-aware weights (must sum to 1.0 per category). Placeholder
+    # calibration targets - to be tuned against observed catalog_return_rate.
+    scale: [0, 100]
+    weights_default:
+      image_sufficiency: 0.20
+      has_video: 0.10
+      title_adequacy: 0.10
+      description_adequacy: 0.15
+      specifications_filled_pct: 0.20
+      has_size_chart: 0.10
+      has_dimensions_listed: 0.05
+      variant_sufficiency: 0.10
+    category_overrides:
+      Fashion: {has_size_chart: 0.25, specifications_filled_pct: 0.10}
+      Home: {has_dimensions_listed: 0.20, has_size_chart: 0.0}
+      Electronics: {specifications_filled_pct: 0.30, has_size_chart: 0.0}
+    sufficiency_targets:
+      image_count_target: 5
+      title_length_chars_band: [40, 120]
+      description_length_chars_target: 300
+      variant_count_target: 3
+
+  trust_score:
+    scale: [0, 100]
+    weights:
+      on_time_delivery_rate: 0.25
+      inverse_rto_rate: 0.20
+      inverse_catalog_return_rate: 0.20
+      inverse_damage_return_share: 0.10
+      delivery_attempt_efficiency: 0.10
+      mean_listing_quality_score: 0.10
+      seller_tier_prior: 0.05
+
+  toxic_rto:
+    top_fraction: 0.10           # "toxic tail" = worst 10% by RTO cost
+    min_shipped_orders: 30        # small-sample guard for per-seller flag
+    toxic_rto_rate_threshold: 0.25
+
+# ---------------------------------------------------------------------
+# Data-quality gaps register. The enum-casing gaps found while drafting this
+# contract were fixed in the Phase B addendum (normalize_enums in
+# config/cleaning_rules.yaml); Silver was rebuilt and re-audited with no
+# regression. Kept here as a resolved record.
+# ---------------------------------------------------------------------
+resolved_data_quality_gaps:
+  - column: fact_returns.item_condition_on_receipt
+    was: Mixed casing/whitespace/separator ('RESELLABLE', ' resellable ', 'write off').
+    status: resolved            # 436 rows normalized -> {resellable, refurbishable, write_off}
+  - column: fact_orders.payment_method
+    was: Mixed casing/whitespace ('COD', ' cod ').
+    status: resolved            # 1055 rows normalized -> {cod, card, wallet, bnpl}
+  - column: dim_seller.fulfillment_type
+    was: Mixed casing/whitespace/separator.
+    status: resolved            # 19 rows normalized
+  - column: dim_seller.seller_country
+    was: Mixed casing/whitespace ('LOCAL', 'cross border').
+    status: resolved            # 9 rows normalized -> {local, cross_border}
+open_data_quality_gaps: []      # none outstanding
+
+# =====================================================================
+# METRICS
+# Each metric carries: business_purpose, formula_conceptual,
+# required_input_columns, grain, dependencies, validation_rules,
+# business_owner, expected_consumers. Derived-only (Golden Rule 1) metrics
+# are tagged `derived_only: true`.
+# =====================================================================
+metrics:
+
+  # ---- BASE METRICS (no metric dependencies) ------------------------
+
+  gross_margin:
+    derived_only: false
+    business_purpose: >
+      Baseline merchandise profitability of delivered sales before returns
+      and reverse logistics. Establishes the profit that is put at risk when
+      a unit is subsequently returned.
+    formula_conceptual: >
+      realized_net_revenue = quantity * unit_selling_price - item_discount_amount
+      (delivered lines only).
+      gross_margin_aed = realized_net_revenue * gross_margin_pct[category].
+      gross_margin_pct is the category-level ratio from ref_category_economics.
+    required_input_columns:
+      - fact_orders.quantity
+      - fact_orders.unit_selling_price
+      - fact_orders.item_discount_amount
+      - fact_orders.order_status
+      - fact_orders.listing_id
+      - dim_listing.category
+      - ref_category_economics.category
+      - ref_category_economics.gross_margin_pct
+    grain: order_line (delivered); aggregatable to listing / seller / category / date
+    dependencies: []
+    validation_rules:
+      - order_status = 'delivered' only.
+      - gross_margin_pct in [0, 1].
+      - realized_net_revenue >= 0 (item_discount_amount must not exceed line revenue).
+      - Exclude rows flagged dq_out_of_range_quantity (quantity = -1).
+    business_owner: Commercial Finance
+    expected_consumers: [Executive P&L dashboard, Category Management,
+      net_margin_after_returns, recoverable_profit]
+
+  recovery_rate:
+    derived_only: false
+    business_purpose: >
+      Fraction of a returned item's merchandise value salvaged via resale or
+      refurbishment. Measures reverse-supply-chain efficiency and feeds the
+      salvage credit inside Return Cost.
+    formula_conceptual: >
+      Per return line: recovery_pct = condition_recovery_map[item_condition_on_receipt]
+      (resellable/refurbishable -> category ratio; write_off -> 0).
+      returned_value = quantity_returned * unit_selling_price (of linked line).
+      recovered_value = returned_value * recovery_pct.
+      recovery_rate = SUM(recovered_value) / SUM(returned_value) at the aggregate grain.
+    required_input_columns:
+      - fact_returns.item_condition_on_receipt
+      - fact_returns.quantity_returned
+      - fact_returns.order_line_id
+      - fact_orders.unit_selling_price
+      - fact_orders.listing_id
+      - dim_listing.category
+      - ref_category_economics.recovery_pct_resellable
+      - ref_category_economics.recovery_pct_refurbishable
+    grain: return_line; aggregatable to category / condition / seller
+    dependencies: []
+    validation_rules:
+      - recovery_rate in [0, 1].
+      - item_condition_on_receipt must be canonical {resellable, refurbishable,
+        write_off} - normalized in Silver (Phase B addendum).
+      - write_off maps to 0 recovery.
+      - returned_value >= 0.
+    business_owner: Reverse Logistics / Refurbishment Ops
+    expected_consumers: [return_cost, Supply Chain dashboard]
+
+  rto_rate:
+    derived_only: false
+    business_purpose: >
+      Share of dispatched orders that fail delivery and return to origin.
+      A pre-delivery loss driver (strongly COD-linked) that is deliberately
+      kept separate from post-delivery returns (Golden Rule 2).
+    formula_conceptual: >
+      rto_orders = COUNT(order_status IN {rto_customer_refused, rto_unreachable}).
+      rto_rate = rto_orders / shipped_orders  (shipped_orders per conventions;
+      excludes cancelled_pre_shipment).
+    required_input_columns:
+      - fact_orders.order_status
+      - fact_orders.payment_method
+      - fact_orders.seller_id
+      - fact_orders.geo_id
+      - fact_orders.order_id
+    grain: seller / geo / payment_method / listing (order-level base)
+    dependencies: []
+    validation_rules:
+      - order_status within the 4-value vocabulary; RTO exists ONLY here,
+        never in fact_returns (Golden Rule 2).
+      - rto_rate in [0, 1].
+      - Denominator excludes cancelled_pre_shipment.
+      - Expect COD segment RTO > non-COD (business rule; do not force).
+    business_owner: Last-Mile / Fulfillment Ops
+    expected_consumers: [toxic_rto_concentration, trust_score,
+      COD risk review, Operations dashboard]
+
+  catalog_return_rate:
+    derived_only: false
+    business_purpose: >
+      Share of delivered units returned for catalog-attributable reasons
+      (not-as-described, sizing, missing info) - the addressable slice of
+      returns that listing/content improvements can reduce.
+    formula_conceptual: >
+      catalog_returned_units = SUM(quantity_returned) WHERE
+      dim_return_reason.is_catalog_related = TRUE (reasons R001, R002, R003).
+      catalog_return_rate = catalog_returned_units / delivered_units.
+      Null reported_reason_code (dq_missing_reported_reason_code) is excluded
+      from the numerator and reported separately as unknown_reason_rate.
+    required_input_columns:
+      - fact_returns.quantity_returned
+      - fact_returns.reported_reason_code
+      - fact_returns.dq_missing_reported_reason_code
+      - dim_return_reason.reason_code
+      - dim_return_reason.is_catalog_related
+      - fact_orders.quantity
+      - fact_orders.order_status
+      - fact_orders.listing_id
+    grain: listing (also category / seller)
+    dependencies: []
+    validation_rules:
+      - Denominator delivered-only (Golden Rule 2).
+      - Rate in [0, 1].
+      - Null-reason handling documented; report unknown_reason_rate alongside.
+    business_owner: Catalog Quality / Category Management
+    expected_consumers: [recoverable_profit, trust_score, Catalog dashboard]
+
+  listing_quality_score:
+    derived_only: true          # Golden Rule 1 - Gold-only, absent from Bronze/Silver
+    business_purpose: >
+      0-100 composite of catalog completeness and richness for a listing. The
+      primary lever to reduce catalog-related returns and the axis along which
+      content-improvement work is prioritized.
+    formula_conceptual: >
+      Category-aware weighted sum of normalized catalog signals, each scaled to
+      [0,1] against sufficiency_targets: image sufficiency, has_video, title
+      adequacy, description adequacy, specifications_filled_pct, has_size_chart,
+      has_dimensions_listed, variant sufficiency.
+      LQS = 100 * SUM(weight[category, signal] * signal_value).
+      Weights come from parameters.listing_quality_score (sum to 1 per category).
+      Imputed inputs (dq_imputed_*) are down-weighted / treated as absent.
+    required_input_columns:
+      - dim_listing.image_count
+      - dim_listing.has_video
+      - dim_listing.title_length_chars
+      - dim_listing.description_length_chars
+      - dim_listing.specifications_filled_pct
+      - dim_listing.has_size_chart
+      - dim_listing.has_dimensions_listed
+      - dim_listing.variant_count
+      - dim_listing.category
+      - dim_listing.dq_imputed_description_length_chars
+      - dim_listing.dq_imputed_specifications_filled_pct
+      - dim_listing.dq_imputed_has_size_chart
+      - dim_listing.dq_imputed_has_dimensions_listed
+      - dim_listing.dq_out_of_range_image_count
+    grain: listing
+    dependencies: []
+    validation_rules:
+      - LQS in [0, 100].
+      - Category weight vectors sum to 1.0.
+      - MUST NOT exist in Bronze or Silver (Golden Rule 1).
+      - No hidden-variable inputs.
+      - Imputed/missing signals flagged and down-weighted.
+    business_owner: Catalog / Content Quality Manager
+    expected_consumers: [trust_score, recoverable_profit prioritization,
+      Catalog dashboard]
+
+  # ---- DERIVED METRICS ----------------------------------------------
+
+  return_cost:
+    derived_only: true          # Golden Rule 1
+    business_purpose: >
+      Fully-loaded AED cost of a post-delivery return: reverse logistics plus
+      warehouse handling plus unrecovered merchandise value. The cost side of
+      catalog-driven revenue leakage. Return Cost's components are defined
+      HERE once and reused by downstream metrics.
+    formula_conceptual: >
+      reverse_logistics_cost = ref_logistics_rate_card.cost_aed
+        [logistics_zone(geo), weight_band(item_weight_kg), leg = 'reverse'].
+      handling_cost = ref_category_economics.warehouse_handling_cost_aed[category].
+      merchandise_loss = refund_amount - recovered_value
+        (recovered_value from recovery_rate).
+      return_cost_aed = reverse_logistics_cost + handling_cost + merchandise_loss.
+    required_input_columns:
+      - fact_returns.refund_amount
+      - fact_returns.quantity_returned
+      - fact_returns.item_condition_on_receipt
+      - fact_returns.order_line_id
+      - fact_orders.geo_id
+      - fact_orders.listing_id
+      - fact_orders.unit_selling_price
+      - dim_geography.logistics_zone
+      - dim_listing.item_weight_kg
+      - dim_listing.category
+      - dim_listing.dq_missing_item_weight_kg
+      - ref_logistics_rate_card.logistics_zone
+      - ref_logistics_rate_card.weight_band
+      - ref_logistics_rate_card.leg
+      - ref_logistics_rate_card.cost_aed
+      - ref_category_economics.warehouse_handling_cost_aed
+      - ref_category_economics.recovery_pct_resellable
+      - ref_category_economics.recovery_pct_refurbishable
+    grain: return_line; aggregatable to listing / seller / category
+    dependencies: [recovery_rate]
+    validation_rules:
+      - reverse_logistics_cost and handling_cost > 0; recovered_value <= returned_value.
+      - weight_band lookup requires item_weight_kg; dq_missing_item_weight_kg
+        rows use the category-median band fallback (documented).
+      - logistics_zone within {urban_core, suburban, remote}.
+      - item_condition_on_receipt normalized in Silver (Phase B addendum).
+      - MUST NOT exist in Bronze or Silver (Golden Rule 1).
+    business_owner: Reverse Logistics / Supply Chain Finance
+    expected_consumers: [recoverable_profit, net_margin_after_returns,
+      Supply Chain dashboard]
+
+  net_margin_after_returns:
+    derived_only: false
+    business_purpose: >
+      True profitability of delivered sales after absorbing return costs - the
+      honest, returns-adjusted margin that exposes loss-making listings and
+      sellers. RTO is deliberately EXCLUDED (kept separate per Golden Rule 2).
+    formula_conceptual: >
+      net_margin_after_returns_aed = SUM(gross_margin_aed on delivered lines)
+        - SUM(return_cost_aed).
+      net_margin_after_returns_pct = net_margin_after_returns_aed /
+        SUM(realized_net_revenue on delivered lines).
+      A separate variant "net_margin_after_returns_and_rto" may additionally
+      subtract RTO forward-leg + handling cost; it is NOT this metric.
+    required_input_columns:
+      - (all gross_margin inputs)
+      - (all return_cost inputs)
+    grain: listing / seller / category (aggregate)
+    dependencies: [gross_margin, return_cost]
+    validation_rules:
+      - May be negative - that is the intended signal (loss-making entity).
+      - Denominator SUM(realized_net_revenue) > 0.
+      - Revenue base delivered-only; RTO cost excluded (documented).
+    business_owner: Commercial Finance / P&L owner
+    expected_consumers: [Executive P&L dashboard, Category & Seller scorecards]
+
+  recoverable_profit:
+    derived_only: true          # Golden Rule 1
+    business_purpose: >
+      The prioritization headline: AED profit currently leaking through
+      catalog-driven returns that is RECOVERABLE by fixing listing/catalog
+      defects. Ranks where catalog investment pays back fastest.
+    formula_conceptual: >
+      For catalog-related return lines only (is_catalog_related = TRUE):
+      forgone_gross_margin = returned_value * gross_margin_pct[category]
+        (profit the reversed sale would have earned; distinct from
+         merchandise_loss already inside return_cost - no double count).
+      catalog_leakage = SUM(return_cost_aed + forgone_gross_margin).
+      recoverable_profit_aed = addressable_fraction * catalog_leakage
+        (addressable_fraction from parameters; default 1.0 => UPPER BOUND).
+      NOTE: LQS is intentionally NOT a factor here (keeps the DAG acyclic).
+      LQS enters the downstream prioritization view: low LQS x high
+      recoverable_profit = fix first.
+    required_input_columns:
+      - (all return_cost inputs)
+      - fact_returns.reported_reason_code
+      - dim_return_reason.is_catalog_related
+      - fact_returns.quantity_returned
+      - fact_orders.unit_selling_price
+      - ref_category_economics.gross_margin_pct
+      - parameters.recoverable_profit.addressable_fraction
+    grain: listing (primary); aggregatable to seller / category
+    dependencies: [return_cost, gross_margin, catalog_return_rate]
+    validation_rules:
+      - recoverable_profit_aed >= 0.
+      - Catalog-related returns only; delivered -> returned lines only.
+      - addressable_fraction in (0, 1]; counterfactual assumption documented.
+      - No double count of merchandise_loss vs forgone_gross_margin.
+      - MUST NOT exist in Bronze or Silver (Golden Rule 1).
+    business_owner: Commercial Analytics / Category Management
+    expected_consumers: [Executive revenue-leakage dashboard,
+      Catalog prioritization, Executive Decision Memo]
+
+  toxic_rto_concentration:
+    derived_only: false
+    business_purpose: >
+      Quantifies how concentrated RTO losses are among the worst
+      sellers/listings/routes - i.e. whether a targeted intervention on a
+      small "toxic tail" (typically COD-heavy) captures most RTO leakage.
+    formula_conceptual: >
+      rto_cost per entity = rto_orders * (forward_logistics_cost + handling_cost)
+        (forward leg from rate card; failed-delivery cost of RTO).
+      Rank entities by rto_cost.
+      toxic_rto_concentration = SUM(rto_cost of top `top_fraction` entities)
+        / SUM(rto_cost of all entities)   -> share in [0,1].
+      Optional per-seller toxic flag: rto_rate > toxic_rto_rate_threshold AND
+      shipped_orders >= min_shipped_orders.
+    required_input_columns:
+      - fact_orders.order_status
+      - fact_orders.seller_id
+      - fact_orders.geo_id
+      - fact_orders.payment_method
+      - fact_orders.listing_id
+      - dim_listing.item_weight_kg
+      - dim_listing.category
+      - dim_geography.logistics_zone
+      - ref_logistics_rate_card.cost_aed
+      - ref_category_economics.warehouse_handling_cost_aed
+      - parameters.toxic_rto
+    grain: seller (also listing / geo x payment); concentration is a per-segment scalar
+    dependencies: [rto_rate]
+    validation_rules:
+      - concentration in [0, 1].
+      - Per-seller flag guarded by min_shipped_orders (small-sample noise).
+      - RTO sourced only from order_status (Golden Rule 2).
+      - Segment by payment_method (COD focus).
+    business_owner: Fraud & Risk / COD Risk Ops
+    expected_consumers: [COD policy review, Seller risk review, Operations dashboard]
+
+  trust_score:
+    derived_only: true          # Golden Rule 1
+    business_purpose: >
+      0-100 OBSERVABLE reliability proxy for a seller (and listing) combining
+      delivery performance, RTO behavior, catalog-return behavior and content
+      quality. A governance/ranking signal built only from observed outcomes.
+    formula_conceptual: >
+      Weighted composite of normalized observable sub-metrics (each -> [0,1],
+      higher = better), weights from parameters.trust_score:
+        on_time_delivery_rate (actual_delivery_date_key <= promised_delivery_date_key),
+        1 - rto_rate, 1 - catalog_return_rate,
+        1 - damage_return_share (reason_group = 'damaged'),
+        delivery_attempt_efficiency (fewer attempts better),
+        mean listing_quality_score of the seller's listings,
+        seller_tier_prior (T1>T2>T3>Unknown, light weight).
+      trust_score = 100 * SUM(weight * component_value).
+      Imputed inputs down-weighted. Hidden SOQ/TPQ/Expectation Gap NOT used.
+    required_input_columns:
+      - fact_orders.order_status
+      - fact_orders.actual_delivery_date_key
+      - fact_orders.promised_delivery_date_key
+      - fact_orders.delivery_attempts
+      - fact_orders.seller_id
+      - fact_returns.reported_reason_code
+      - dim_return_reason.reason_group
+      - dim_seller.seller_tier
+      - dim_seller.dq_imputed_seller_tier
+      # composed metrics:
+      - rto_rate
+      - catalog_return_rate
+      - listing_quality_score
+    grain: seller (also listing)
+    dependencies: [rto_rate, catalog_return_rate, listing_quality_score]
+    validation_rules:
+      - trust_score in [0, 100].
+      - Component weights sum to 1.0 (calibration targets in config).
+      - NO hidden-variable inputs (observable proxy only).
+      - on_time uses non-null actual_delivery (delivered lines).
+      - MUST NOT exist in Bronze or Silver (Golden Rule 1).
+    business_owner: Seller Experience / Marketplace Governance
+    expected_consumers: [Seller scorecards, ranking/search signals, Trust dashboard]

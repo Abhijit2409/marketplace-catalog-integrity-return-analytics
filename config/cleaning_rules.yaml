@@ -1,0 +1,118 @@
+# =====================================================================
+# Silver Layer Cleaning Rules  (Phase B - Cleaning Priorities)
+# =====================================================================
+# Declarative contract consumed by src/cleaning/silver_build.py.
+# Bronze is READ-ONLY; every transform writes to data/02_silver.
+#
+# Guiding principles (CLAUDE.md):
+#   * Validation before transformation; fail closed on structural error.
+#   * Do NOT invent business rules. Any value we synthesize (imputation,
+#     range quarantine) is a documented CLEANING ASSUMPTION and carries an
+#     auditable `dq_*` flag so no information is silently manufactured.
+#   * Never fabricate a value that Gold turns into a rate/ratio (price,
+#     weight) -> keep null + flag, let Gold decide.
+#
+# All quality-annotation columns added by the Silver build use the `dq_`
+# prefix so the layer's schema stays self-documenting.
+# =====================================================================
+
+bronze_dir: data/01_bronze
+silver_dir: data/02_silver
+
+# Logical "today" for temporal consistency (Task #6). A delivered/return
+# event dated after this is a temporal anomaly (flagged, not deleted).
+# Set to the session date; this implements the Phase A "delivered-in-the-
+# future" to-do. Change to the dataset horizon (20260815) to treat the max
+# event date as the reference instead.
+as_of_date_key: 20260707
+
+# --- Task 2: canonical category vocabulary -------------------------------
+categories:
+  canonical: [Fashion, Electronics, Home, Beauty, Sports]
+  unmapped_value: Unknown   # value assigned if no canonical match (none expected)
+
+# --- Task 3: date-dimension extension ------------------------------------
+calendar:
+  table: dim_date
+  # Inclusive upper bound. 20260815 == max fact date (return_received) so the
+  # date FK resolves to exactly zero orphans after the extension.
+  extend_through: 20260815
+  weekend_days: [Saturday, Sunday]   # modern UAE weekend (matches Bronze)
+  # Documented ASSUMPTION: no major religious / promotional / public-holiday
+  # events fall in 2026-07-01..08-15 (Ramadan & Eid are earlier in 2026;
+  # White Friday is November). Hijri dates are NOT asserted from memory.
+  event_flag_defaults:
+    is_ramadan: false
+    is_eid_period: false
+    is_white_friday_period: false
+    is_uae_public_holiday: false
+
+# --- Per-table cleaning operations ---------------------------------------
+# Tables not listed are passed through to Silver unchanged (they were clean
+# in the Phase A audit): dim_geography, dim_return_reason,
+# ref_category_economics, ref_logistics_rate_card.
+tables:
+
+  dim_seller:
+    file: dim_seller.csv
+    dedup_pk: [seller_id]                       # Task 1
+    normalize_enums:                            # Phase B addendum
+      - {column: fulfillment_type, canonical: [marketplace_fulfilled, seller_fulfilled]}
+      - {column: seller_country, canonical: [local, cross_border]}
+    null_policy:                                # Task 4
+      seller_tier: {strategy: fill, value: Unknown}
+
+  dim_listing:
+    file: dim_listing.csv
+    dedup_pk: [listing_id]                      # Task 1
+    normalize_category: category                # Task 2
+    null_policy:                                # Task 4
+      brand: {strategy: fill, value: Unknown}
+      description_length_chars: {strategy: fill, value: 0}
+      specifications_filled_pct: {strategy: fill, value: 0.0}
+      has_size_chart: {strategy: fill, value: false}
+      has_dimensions_listed: {strategy: fill, value: false}
+      # Measures feeding downstream ratios - never fabricate.
+      price: {strategy: flag_missing}
+      item_weight_kg: {strategy: flag_missing}
+    ranges:                                     # Task 5
+      - {column: discount_pct, min: 0.0, max: 1.0, on_invalid: 'null'}
+      - {column: image_count, min: 0, on_invalid: 'null'}
+
+  fact_listing_traffic:
+    file: fact_listing_traffic.csv
+    dedup_pk: [listing_id, date_key]            # Task 1
+    null_policy:                                # Task 4
+      # ASSUMPTION: missing add_to_carts == 0 adds (may be "untracked"; flag).
+      add_to_carts: {strategy: fill, value: 0.0}
+
+  fact_orders:
+    file: fact_orders.csv
+    normalize_enums:                            # Phase B addendum
+      - {column: payment_method, canonical: [cod, card, wallet, bnpl]}
+    null_policy:                                # Task 4
+      # ASSUMPTION: missing shipping_fee == free shipping (0.0); flag.
+      shipping_fee_charged: {strategy: fill, value: 0.0}
+      # Nullable by design: null iff order never delivered. Keep as-is.
+      actual_delivery_date_key: {strategy: keep}
+    ranges:                                     # Task 5
+      # Core fact measure: flag but KEEP the raw value; Gold decides.
+      - {column: quantity, min: 1, on_invalid: keep}
+    temporal: orders                            # Task 6
+
+  fact_returns:
+    file: fact_returns.csv
+    dedup_pk: [return_id]                       # Task 1
+    normalize_enums:                            # Phase B addendum
+      - {column: item_condition_on_receipt, canonical: [resellable, refurbishable, write_off]}
+    null_policy:                                # Task 4
+      # FK to dim_return_reason; a fabricated code would break RI. Keep+flag.
+      reported_reason_code: {strategy: flag_missing}
+    temporal: returns                           # Task 6
+
+# Pass-through tables (copied to Silver verbatim).
+passthrough:
+  - {file: dim_geography.csv}
+  - {file: dim_return_reason.csv}
+  - {file: ref_category_economics.csv}
+  - {file: ref_logistics_rate_card.csv}

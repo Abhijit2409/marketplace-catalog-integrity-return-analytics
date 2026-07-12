@@ -1,0 +1,58 @@
+# =====================================================================
+# .gitignore — Marketplace Catalog Integrity & Return Analytics
+# Analytics Engineering repository. Source (SQL, Python, YAML, Markdown,
+# and the Bronze/Silver sample data) is versioned; generated artifacts are not.
+# =====================================================================
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ---- Editors / IDE ----
+.idea/
+.vscode/
+*.swp
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Local tooling ----
+.claude/
+
+# ---- Generated artifacts (reproducible from source) ----
+# The Gold database and its exports are rebuilt by scripts/build_gold.py and
+# scripts/export_gold.py — never committed.
+gold.duckdb
+*.duckdb.wal
+data/03_gold/
+
+# Machine-readable run reports are regenerated on every build; the Markdown
+# reports are kept as committed evidence.
+docs/*.json
+
+# ---- Temporary exports / logs / scratch ----
+*.log
+logs/
+tmp/
+scratch/
+scratchpad/
+*.tmp
+*.bak
+
+# =====================================================================
+# Intentionally KEPT (do not ignore):
+#   data/01_bronze/    - raw sample data (source of truth for the pipeline)
+#   data/02_silver/    - cleaned sample data (reproducible, but kept as a sample)
+#   sql/, src/, config/, scripts/   - all pipeline source
+#   docs/*.md          - specifications & run reports (Markdown)
+#   *.pbix             - Power BI dashboard file, once built (a deliverable)
+# =====================================================================

@@ -1,0 +1,6 @@
+category,gross_margin_pct,warehouse_handling_cost_aed,recovery_pct_resellable,recovery_pct_refurbishable
+Fashion,0.5,8.0,0.92,0.55
+Electronics,0.14,9.0,0.88,0.5
+Home,0.35,7.0,0.9,0.52
+Beauty,0.55,6.0,0.75,0.35
+Sports,0.38,7.5,0.9,0.52

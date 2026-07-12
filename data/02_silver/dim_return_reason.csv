@@ -1,0 +1,11 @@
+reason_code,reason_description,reason_group,is_catalog_related,is_refund_eligible
+R001,Item not as described,catalog_mismatch,True,True
+R002,Wrong size / fit issue,sizing,True,True
+R003,Missing product information,catalog_mismatch,True,True
+R004,Damaged on arrival,damaged,False,True
+R005,Product defective,damaged,False,True
+R006,Changed my mind,remorse,False,False
+R007,Ordered by mistake,remorse,False,False
+R008,Late delivery,delivery_issue,False,True
+R009,Wrong item delivered,delivery_issue,False,True
+R010,Duplicate order,remorse,False,False
