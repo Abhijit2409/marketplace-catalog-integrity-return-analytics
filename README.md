@@ -252,11 +252,3 @@ Silver layer, not a build failure. Every downstream step exits 0.
 - CI that runs `build_gold.py` on every change and blocks merge on a failed validation.
 - Python EDA notebooks and the executive decision memo.
 
-## 17. License
-
-MIT (see `LICENSE`).
-
-## 18. Contact
-
-**Abhijit Mishra** — abhijitmishra0103@gmail.com
-_GitHub / LinkedIn: add links before publication._
